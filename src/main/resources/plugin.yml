@@ -1,0 +1,18 @@
+name: BlockWatch
+version: ${project.version}
+main: io.github.cndrbrbr.blockwatch.BlockWatchPlugin
+api-version: '26.3'
+author: cndrbrbr
+description: ${project.description}
+
+commands:
+  bw:
+    description: BlockWatch - wer hat hier wann was gemacht?
+    usage: /<command> <hier|inspect|gefahr|spieler|stats|bei|seite>
+    aliases: [blockwatch]
+    permission: blockwatch.use
+
+permissions:
+  blockwatch.use:
+    description: Darf das BlockWatch-Protokoll abfragen
+    default: op

@@ -1,0 +1,18 @@
+# BlockWatch - Grundkonfiguration
+
+# Eintraege, die aelter sind, werden einmal taeglich geloescht. 0 = nie loeschen.
+retention-days: 180
+
+# Zeitzone fuer die Anzeige von Datum/Uhrzeit.
+timezone: Europe/Berlin
+
+# Standard-Radius (in Bloecken, in alle Richtungen) fuer /bw hier und /bw gefahr.
+default-radius: 5
+max-radius: 50
+
+# Eintraege pro Seite in der Chat-Ausgabe.
+page-size: 10
+
+# Gesetzte/abgebaute Bloecke protokollieren (gefaehrliche Aktionen werden immer protokolliert).
+log-break: true
+log-place: true
