@@ -8,10 +8,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * SQLite-Speicher (der Treiber steckt im Spigot-Server-Jar). Alle Methoden
@@ -32,8 +32,8 @@ public final class Database implements AutoCloseable {
         }
     }
 
-    /** Anzahl je Aktion fuer eine Kombination aus Akteur und Blocktyp. */
-    public record MaterialSummary(String actor, String material, Map<Action, Integer> counts) {
+    /** Anzahl je Aktion fuer eine Kombination aus Akteur und Blocktyp, mit Zeitpunkt der letzten Aktion. */
+    public record MaterialSummary(String actor, String material, Map<Action, Integer> counts, long lastTimestamp) {
         public int total() {
             return counts.values().stream().mapToInt(Integer::intValue).sum();
         }
@@ -99,52 +99,54 @@ public final class Database implements AutoCloseable {
         }
     }
 
-    /** Eintraege im Quader um {@code area}, neueste zuerst. */
-    public synchronized List<LogEntry> near(Area area, long since, boolean dangerOnly, int limit) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement("SELECT * FROM events WHERE " + areaClause()
-                + " AND ts >= ?" + (dangerOnly ? " AND danger = 1" : "") + " ORDER BY ts DESC, id DESC LIMIT ?")) {
-            int index = bindArea(query, area);
-            query.setLong(index++, since);
-            query.setInt(index, limit);
-            return readEntries(query);
-        }
-    }
-
-    /** Zusammenfassung je Akteur im Quader um {@code area}, meiste Aktionen zuerst. */
-    public synchronized List<ActorSummary> summaryNear(Area area, long since, boolean dangerOnly) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement("SELECT actor, action, COUNT(*) FROM events WHERE "
-                + areaClause() + " AND ts >= ?" + (dangerOnly ? " AND danger = 1" : "") + " GROUP BY actor, action")) {
-            int index = bindArea(query, area);
-            query.setLong(index, since);
-            return readSummaries(query);
-        }
-    }
-
-    /** Zusammenfassung je Akteur und Blocktyp im Quader, sortiert nach Akteur (meiste zuerst), dann Anzahl. */
-    public synchronized List<MaterialSummary> materialsNear(Area area, long since, boolean dangerOnly)
+    /**
+     * Statistik je Akteur und Blocktyp. {@code area} und {@code actor} sind
+     * optional (null = ueberall bzw. alle Akteure). Sortiert nach Akteur
+     * (meiste Aktionen zuerst), innerhalb davon nach Anzahl.
+     */
+    public synchronized List<MaterialSummary> materials(Area area, String actor, long since, boolean dangerOnly)
             throws SQLException {
+        StringBuilder sql = new StringBuilder("SELECT actor, material, action, COUNT(*), MAX(ts) FROM events WHERE ts >= ?");
+        if (area != null) {
+            sql.append(" AND ").append(areaClause());
+        }
+        if (actor != null) {
+            sql.append(" AND actor = ? COLLATE NOCASE");
+        }
+        if (dangerOnly) {
+            sql.append(" AND danger = 1");
+        }
+        sql.append(" GROUP BY actor, material, action");
         Map<String, Map<String, Map<Action, Integer>>> byActor = new LinkedHashMap<>();
-        try (PreparedStatement query = connection.prepareStatement("SELECT actor, material, action, COUNT(*) FROM events "
-                + "WHERE " + areaClause() + " AND ts >= ?" + (dangerOnly ? " AND danger = 1" : "")
-                + " GROUP BY actor, material, action")) {
-            int index = bindArea(query, area);
-            query.setLong(index, since);
+        Map<String, Long> lastByKey = new HashMap<>();
+        try (PreparedStatement query = connection.prepareStatement(sql.toString())) {
+            query.setLong(1, since);
+            int index = 2;
+            if (area != null) {
+                index = bindArea(query, area, index);
+            }
+            if (actor != null) {
+                query.setString(index, actor);
+            }
             try (ResultSet result = query.executeQuery()) {
                 while (result.next()) {
                     Action action = Action.fromName(result.getString(3)).orElse(null);
-                    if (action != null) {
-                        byActor.computeIfAbsent(result.getString(1), key -> new LinkedHashMap<>())
-                                .computeIfAbsent(result.getString(2), key -> new LinkedHashMap<>())
-                                .merge(action, result.getInt(4), Integer::sum);
+                    if (action == null) {
+                        continue;
                     }
+                    byActor.computeIfAbsent(result.getString(1), key -> new LinkedHashMap<>())
+                            .computeIfAbsent(result.getString(2), key -> new LinkedHashMap<>())
+                            .merge(action, result.getInt(4), Integer::sum);
+                    lastByKey.merge(result.getString(1) + "\u0000" + result.getString(2), result.getLong(5), Math::max);
                 }
             }
         }
         List<MaterialSummary> summaries = new ArrayList<>();
         byActor.entrySet().stream()
                 .sorted((a, b) -> Integer.compare(actorTotal(b.getValue()), actorTotal(a.getValue())))
-                .forEach(actor -> actor.getValue().entrySet().stream()
-                        .map(material -> new MaterialSummary(actor.getKey(), material.getKey(), material.getValue()))
+                .forEach(entry -> entry.getValue().entrySet().stream()
+                        .map(material -> new MaterialSummary(entry.getKey(), material.getKey(), material.getValue(),
+                                lastByKey.get(entry.getKey() + "\u0000" + material.getKey())))
                         .sorted((a, b) -> Integer.compare(b.total(), a.total()))
                         .forEach(summaries::add));
         return summaries;
@@ -152,42 +154,6 @@ public final class Database implements AutoCloseable {
 
     private static int actorTotal(Map<String, Map<Action, Integer>> materials) {
         return materials.values().stream().flatMap(m -> m.values().stream()).mapToInt(Integer::intValue).sum();
-    }
-
-    /** Alle Eintraege genau dieses Blocks, neueste zuerst. */
-    public synchronized List<LogEntry> block(String world, int x, int y, int z, int limit) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement(
-                "SELECT * FROM events WHERE world = ? AND x = ? AND z = ? AND y = ? ORDER BY ts DESC, id DESC LIMIT ?")) {
-            query.setString(1, world);
-            query.setInt(2, x);
-            query.setInt(3, z);
-            query.setInt(4, y);
-            query.setInt(5, limit);
-            return readEntries(query);
-        }
-    }
-
-    /** Gefaehrliche Aktionen auf dem ganzen Server, neueste zuerst. */
-    public synchronized List<LogEntry> dangerous(long since, int limit) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement(
-                "SELECT * FROM events WHERE danger = 1 AND ts >= ? ORDER BY ts DESC, id DESC LIMIT ?")) {
-            query.setLong(1, since);
-            query.setInt(2, limit);
-            return readEntries(query);
-        }
-    }
-
-    /** Aktionen eines Akteurs (Spielername, ohne Gross-/Kleinschreibung), neueste zuerst. */
-    public synchronized List<LogEntry> byActor(String actor, long since, boolean dangerOnly, int limit)
-            throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement(
-                "SELECT * FROM events WHERE actor = ? COLLATE NOCASE AND ts >= ?"
-                        + (dangerOnly ? " AND danger = 1" : "") + " ORDER BY ts DESC, id DESC LIMIT ?")) {
-            query.setString(1, actor);
-            query.setLong(2, since);
-            query.setInt(3, limit);
-            return readEntries(query);
-        }
     }
 
     /** Zusammenfassung je Akteur auf dem ganzen Server (fuer /bw stats und /bw spieler). */
@@ -226,32 +192,16 @@ public final class Database implements AutoCloseable {
         return "world = ? AND x BETWEEN ? AND ? AND z BETWEEN ? AND ? AND y BETWEEN ? AND ?";
     }
 
-    private static int bindArea(PreparedStatement statement, Area area) throws SQLException {
-        statement.setString(1, area.world());
-        statement.setInt(2, area.x() - area.radius());
-        statement.setInt(3, area.x() + area.radius());
-        statement.setInt(4, area.z() - area.radius());
-        statement.setInt(5, area.z() + area.radius());
-        statement.setInt(6, area.y() - area.radius());
-        statement.setInt(7, area.y() + area.radius());
-        return 8;
-    }
-
-    private static List<LogEntry> readEntries(PreparedStatement query) throws SQLException {
-        List<LogEntry> entries = new ArrayList<>();
-        try (ResultSet result = query.executeQuery()) {
-            while (result.next()) {
-                Action action = Action.fromName(result.getString("action")).orElse(null);
-                if (action == null) {
-                    continue;
-                }
-                String player = result.getString("player");
-                entries.add(new LogEntry(result.getLong("ts"), result.getString("world"), result.getInt("x"),
-                        result.getInt("y"), result.getInt("z"), player != null ? UUID.fromString(player) : null,
-                        result.getString("actor"), action, result.getString("material")));
-            }
-        }
-        return entries;
+    /** Bindet die sieben Bereichsparameter ab {@code index}; liefert den naechsten freien Index. */
+    private static int bindArea(PreparedStatement statement, Area area, int index) throws SQLException {
+        statement.setString(index, area.world());
+        statement.setInt(index + 1, area.x() - area.radius());
+        statement.setInt(index + 2, area.x() + area.radius());
+        statement.setInt(index + 3, area.z() - area.radius());
+        statement.setInt(index + 4, area.z() + area.radius());
+        statement.setInt(index + 5, area.y() - area.radius());
+        statement.setInt(index + 6, area.y() + area.radius());
+        return index + 7;
     }
 
     private static List<ActorSummary> readSummaries(PreparedStatement query) throws SQLException {

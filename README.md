@@ -44,10 +44,10 @@ ausbruchsichere Zelle sorgen).
 
 | Befehl | |
 |---|---|
-| `/bw hier [radius] [zeit]` | alles im Umkreis um die eigene Position: erst eine Statistik **Spieler · Blocktyp · Anzahl** (je Aktion), dann die Einträge (neueste zuerst) |
+| `/bw hier [radius] [zeit]` | Statistik im Umkreis um die eigene Position |
 | `/bw gefahr [radius\|alle] [zeit]` | nur gefährliche Aktionen – um dich herum oder mit `alle` auf dem ganzen Server |
-| `/bw inspect` | Inspektionsmodus an/aus: **Linksklick** = Verlauf dieses Blocks, **Rechtsklick** = Verlauf des Platzes davor (z. B. wo ein Block abgebaut wurde) |
-| `/bw spieler <name> [gefahr] [zeit]` | was ein Spieler wo gemacht hat |
+| `/bw inspect` | Inspektionsmodus an/aus: **Linksklick** = Statistik dieses Blocks, **Rechtsklick** = des Platzes davor (z. B. wo ein Block abgebaut wurde) |
+| `/bw spieler <name> [gefahr] [zeit]` | Statistik eines Spielers über den ganzen Server |
 | `/bw stats [zeit]` | Rangliste: abgebaut / gesetzt / gefährlich je Spieler |
 | `/bw bei <welt> <x> <y> <z> [radius] [zeit] [gefahr]` | wie `hier`, für die Konsole/RCON |
 | `/bw seite <n>` | in der letzten Abfrage blättern |
@@ -55,8 +55,17 @@ ausbruchsichere Zelle sorgen).
 | `/bw frei <spieler>` | vorzeitig freilassen (offline: beim nächsten Login) |
 | `/bw setjail` | Gefängniszelle an die eigene Position setzen |
 
-Zeitangaben: `30m`, `2h`, `7d`, `2w` (ohne Angabe: alles). Der Radius gilt in alle Richtungen
-(Würfel), Standard 5. Im Spiel kann man auf einen Eintrag klicken, um hinzuteleportieren.
+Alle Abfragen zeigen eine **Statistik** statt einzelner Einträge – eine Zeile je Spieler und Blocktyp:
+
+```
+Spieler · Blocktyp · Anzahl · zuletzt
+JuJaXX · Stone · 34 abgebaut, 12 gesetzt · 21.10.26 20:26
+JuJaXX · Tnt · 5 verbotener Versuch · 21.10.26 20:30
+#TNT · Dirt · 22 gesprengt · 21.10.26 20:31
+```
+
+Sortiert nach Spieler (meiste Aktionen zuerst), dann nach Anzahl. Zeitangaben: `30m`, `2h`, `7d`,
+`2w` (ohne Angabe: alles). Der Radius gilt in alle Richtungen (Würfel), Standard 5.
 
 ## Installation
 

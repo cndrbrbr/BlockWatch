@@ -3,13 +3,7 @@ package io.github.cndrbrbr.blockwatch.command;
 import io.github.cndrbrbr.blockwatch.BlockWatchPlugin;
 import io.github.cndrbrbr.blockwatch.storage.Action;
 import io.github.cndrbrbr.blockwatch.storage.Database;
-import io.github.cndrbrbr.blockwatch.storage.LogEntry;
 import io.github.cndrbrbr.blockwatch.util.TimeArgs;
-import net.md_5.bungee.api.chat.BaseComponent;
-import net.md_5.bungee.api.chat.ClickEvent;
-import net.md_5.bungee.api.chat.HoverEvent;
-import net.md_5.bungee.api.chat.TextComponent;
-import net.md_5.bungee.api.chat.hover.content.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -25,33 +19,40 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 
-/** {@code /bw} - Abfragen des Protokolls, siehe README.md. */
+/**
+ * {@code /bw} - Abfragen des Protokolls, siehe README.md. Alle Abfragen
+ * zeigen eine Statistik "Spieler · Blocktyp · Anzahl je Aktion" mit dem
+ * Zeitpunkt der letzten Aktion, keine Einzeleintraege.
+ */
 public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = List.of("hier", "inspect", "gefahr", "spieler", "stats", "bei", "seite",
             "jail", "frei", "setjail");
-    /** Hoechstens so viele Eintraege je Abfrage laden (danach weiter eingrenzen). */
-    private static final int QUERY_LIMIT = 1000;
     private static final int TOP_ACTORS = 15;
-    private static final int SUMMARY_ROWS = 15;
 
-    /** Ergebnis einer Abfrage zum Blaettern: feste Kopfzeilen plus Eintragszeilen. */
-    private record Pages(List<String> header, List<LogEntry> entries) {
+    /** Ergebnis einer Abfrage zum Blaettern: feste Kopfzeilen plus Statistikzeilen. */
+    private record Pages(List<String> header, List<String> rows) {
     }
 
-    /** Abfrage, die im Async-Task laeuft und die Seiten liefert. */
+    /** Abfrage, die (fuer Spieler) im Async-Task laeuft und die Seiten liefert. */
     @FunctionalInterface
     private interface Query {
         Pages run() throws SQLException;
+    }
+
+    /** Radius und Zeitraum aus den Argumenten (Reihenfolge egal). */
+    private record Filter(int radius, long since, String timeLabel) {
     }
 
     private final BlockWatchPlugin plugin;
@@ -84,7 +85,7 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
-        String[] rest = java.util.Arrays.copyOfRange(args, 1, args.length);
+        String[] rest = Arrays.copyOfRange(args, 1, args.length);
         switch (sub) {
             case "hier", "here" -> handleHere(sender, rest, false);
             case "gefahr", "danger" -> handleDanger(sender, rest);
@@ -103,10 +104,10 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
 
     private void sendHelp(CommandSender sender) {
         sender.sendMessage("§6BlockWatch §7- wer hat wann was gemacht?");
-        sender.sendMessage("§e/bw hier §7[radius] [zeit] §f- alles im Umkreis um dich");
-        sender.sendMessage("§e/bw gefahr §7[radius|alle] [zeit] §f- TNT, Feuer, Lava, Explosionen");
+        sender.sendMessage("§e/bw hier §7[radius] [zeit] §f- Statistik im Umkreis um dich");
+        sender.sendMessage("§e/bw gefahr §7[radius|alle] [zeit] §f- nur TNT, Feuer, Lava, Explosionen");
         sender.sendMessage("§e/bw inspect §f- an/aus: Linksklick = dieser Block, Rechtsklick = Platz davor");
-        sender.sendMessage("§e/bw spieler §7<name> [gefahr] [zeit] §f- was ein Spieler gemacht hat");
+        sender.sendMessage("§e/bw spieler §7<name> [gefahr] [zeit] §f- Statistik eines Spielers");
         sender.sendMessage("§e/bw stats §7[zeit] §f- Rangliste aller Spieler");
         sender.sendMessage("§e/bw bei §7<welt> <x> <y> <z> [radius] [zeit] §f- wie hier, z. B. von der Konsole");
         sender.sendMessage("§e/bw seite §7<n> §f- weiterblättern");
@@ -136,18 +137,15 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         try {
             Location location = new Location(world, Integer.parseInt(args[1]), Integer.parseInt(args[2]),
                     Integer.parseInt(args[3]));
-            String[] rest = java.util.Arrays.copyOfRange(args, 4, args.length);
-            boolean dangerOnly = java.util.Arrays.stream(rest).anyMatch(a -> a.equalsIgnoreCase("gefahr"));
-            queryArea(sender, location, rest, dangerOnly);
+            String[] rest = Arrays.copyOfRange(args, 4, args.length);
+            queryArea(sender, location, rest, hasFlag(rest, "gefahr"));
         } catch (NumberFormatException exception) {
             sender.sendMessage("§cUngültige Koordinaten.");
         }
     }
 
     private void handleDanger(CommandSender sender, String[] args) {
-        boolean everywhere = !(sender instanceof Player)
-                || java.util.Arrays.stream(args).anyMatch(a -> a.equalsIgnoreCase("alle"));
-        if (!everywhere) {
+        if (sender instanceof Player && !hasFlag(args, "alle")) {
             handleHere(sender, args, true);
             return;
         }
@@ -155,8 +153,8 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         if (filter == null) {
             return;
         }
-        runQuery(sender, () -> new Pages(List.of("§6BlockWatch §7- gefährliche Aktionen auf dem ganzen Server, "
-                + filter.timeLabel), database.dangerous(filter.since, QUERY_LIMIT)));
+        runQuery(sender, () -> statistics("§6BlockWatch §7- §cgefährliche Aktionen §7auf dem ganzen Server, "
+                + filter.timeLabel, database.materials(null, null, filter.since, true)));
     }
 
     private void queryArea(CommandSender sender, Location location, String[] args, boolean dangerOnly) {
@@ -166,26 +164,9 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         }
         Database.Area area = new Database.Area(location.getWorld().getName(), location.getBlockX(),
                 location.getBlockY(), location.getBlockZ(), filter.radius);
-        runQuery(sender, () -> {
-            List<String> header = new ArrayList<>();
-            header.add("§6BlockWatch §7- " + (dangerOnly ? "§cgefährliche Aktionen §7" : "")
-                    + "Umkreis " + filter.radius + " um §f" + area.x() + " " + area.y() + " " + area.z()
-                    + "§7, " + filter.timeLabel);
-            List<Database.MaterialSummary> rows = database.materialsNear(area, filter.since, dangerOnly);
-            if (!rows.isEmpty()) {
-                header.add("§7Statistik §8(Spieler · Blocktyp · Anzahl)§7:");
-            }
-            for (Database.MaterialSummary row : rows.subList(0, Math.min(SUMMARY_ROWS, rows.size()))) {
-                header.add(materialLine(row));
-            }
-            if (rows.size() > SUMMARY_ROWS) {
-                header.add("§8… und " + (rows.size() - SUMMARY_ROWS) + " weitere Kombinationen (Radius/Zeit eingrenzen)");
-            }
-            if (!rows.isEmpty()) {
-                header.add("§7Einträge:");
-            }
-            return new Pages(header, database.near(area, filter.since, dangerOnly, QUERY_LIMIT));
-        });
+        runQuery(sender, () -> statistics("§6BlockWatch §7- " + (dangerOnly ? "§cgefährliche Aktionen §7" : "")
+                + "Umkreis " + filter.radius + " um §f" + area.x() + " " + area.y() + " " + area.z() + "§7, "
+                + filter.timeLabel, database.materials(area, null, filter.since, dangerOnly)));
     }
 
     private void handleInspect(CommandSender sender) {
@@ -197,16 +178,17 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             player.sendMessage("§6BlockWatch §7Inspektion §caus§7.");
         } else {
             inspecting.add(player.getUniqueId());
-            player.sendMessage("§6BlockWatch §7Inspektion §aan§7: §fLinksklick§7 = Verlauf dieses Blocks, "
-                    + "§fRechtsklick§7 = Verlauf des Platzes davor (z. B. abgebaute Blöcke). Aus mit §e/bw inspect§7.");
+            player.sendMessage("§6BlockWatch §7Inspektion §aan§7: §fLinksklick§7 = dieser Block, "
+                    + "§fRechtsklick§7 = Platz davor (z. B. abgebaute Blöcke). Aus mit §e/bw inspect§7.");
         }
     }
 
-    /** Vom InspectListener aufgerufen. */
+    /** Vom InspectListener aufgerufen: Statistik genau dieses Blocks (Radius 0). */
     public void showBlock(Player player, Block block) {
-        runQuery(player, () -> new Pages(List.of("§6BlockWatch §7- Verlauf von §f" + block.getX() + " "
-                + block.getY() + " " + block.getZ() + " §7(jetzt: " + pretty(block.getType().name()) + ")"),
-                database.block(block.getWorld().getName(), block.getX(), block.getY(), block.getZ(), QUERY_LIMIT)));
+        Database.Area area = new Database.Area(block.getWorld().getName(), block.getX(), block.getY(), block.getZ(), 0);
+        runQuery(player, () -> statistics("§6BlockWatch §7- Block §f" + block.getX() + " " + block.getY() + " "
+                + block.getZ() + " §7(jetzt: " + pretty(block.getType().name()) + ")",
+                database.materials(area, null, 0, false)));
     }
 
     private void handlePlayer(CommandSender sender, String[] args) {
@@ -215,24 +197,14 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             return;
         }
         String name = args[0];
-        String[] rest = java.util.Arrays.copyOfRange(args, 1, args.length);
-        boolean dangerOnly = java.util.Arrays.stream(rest).anyMatch(a -> a.equalsIgnoreCase("gefahr"));
+        String[] rest = Arrays.copyOfRange(args, 1, args.length);
+        boolean dangerOnly = hasFlag(rest, "gefahr");
         Filter filter = parseFilter(sender, rest);
         if (filter == null) {
             return;
         }
-        runQuery(sender, () -> {
-            List<String> header = new ArrayList<>();
-            header.add("§6BlockWatch §7- Spieler §f" + name + "§7, " + filter.timeLabel
-                    + (dangerOnly ? ", nur gefährliche Aktionen" : ""));
-            List<Database.ActorSummary> summary = database.summary(filter.since, name);
-            if (summary.isEmpty()) {
-                header.add("§7Keine Einträge.");
-            } else {
-                header.add(detailLine(summary.get(0)));
-            }
-            return new Pages(header, database.byActor(name, filter.since, dangerOnly, QUERY_LIMIT));
-        });
+        runQuery(sender, () -> statistics("§6BlockWatch §7- Spieler §f" + name + "§7, " + filter.timeLabel
+                + (dangerOnly ? ", nur gefährliche Aktionen" : ""), database.materials(null, name, filter.since, dangerOnly)));
     }
 
     private void handleStats(CommandSender sender, String[] args) {
@@ -240,16 +212,15 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         if (filter == null) {
             return;
         }
-        runAsync(sender, () -> {
+        runQuery(sender, () -> {
             List<Database.ActorSummary> summaries = database.summary(filter.since, null);
-            List<String> lines = new ArrayList<>();
-            lines.add("§6BlockWatch §7- Rangliste, " + filter.timeLabel + " §8(Einträge: " + database.count() + ")");
+            List<String> rows = new ArrayList<>();
             int rank = 1;
             for (Database.ActorSummary summary : summaries) {
                 if (summary.actor().startsWith("#")) {
                     continue;
                 }
-                lines.add("§e" + rank + ". " + summaryLine(summary));
+                rows.add("§e" + rank + ". " + summaryLine(summary));
                 if (++rank > TOP_ACTORS) {
                     break;
                 }
@@ -257,9 +228,10 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             List<String> environment = summaries.stream().filter(s -> s.actor().startsWith("#"))
                     .map(s -> s.actor().substring(1) + " " + s.total()).toList();
             if (!environment.isEmpty()) {
-                lines.add("§7Ohne Spieler: " + String.join(", ", environment));
+                rows.add("§7Ohne Spieler: " + String.join(", ", environment));
             }
-            return lines;
+            return new Pages(List.of("§6BlockWatch §7- Rangliste, " + filter.timeLabel + " §8(Einträge: "
+                    + database.count() + ")"), rows);
         });
     }
 
@@ -269,18 +241,82 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("§cKeine vorherige Abfrage.");
             return;
         }
-        int page;
         try {
-            page = args.length > 0 ? Integer.parseInt(args[0]) : 1;
+            sendPage(sender, pages, args.length > 0 ? Integer.parseInt(args[0]) : 1);
         } catch (NumberFormatException exception) {
             sender.sendMessage("§cUngültige Seitenzahl.");
-            return;
         }
-        sendPage(sender, pages, page);
     }
 
-    /** Radius und Zeitraum aus den Argumenten (Reihenfolge egal). */
-    private record Filter(int radius, long since, String timeLabel) {
+    private void handleJail(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            sender.sendMessage("§eBenutzung: /bw jail <spieler> [minuten]");
+            return;
+        }
+        Player target = Bukkit.getPlayerExact(args[0]);
+        if (target == null) {
+            sender.sendMessage("§cSpieler ist nicht online: " + args[0]);
+            return;
+        }
+        int minutes = plugin.getConfig().getInt("protection.jail-minutes", 3);
+        if (args.length > 1) {
+            try {
+                minutes = Integer.parseInt(args[1]);
+            } catch (NumberFormatException exception) {
+                sender.sendMessage("§cUngültige Minutenzahl: " + args[1]);
+                return;
+            }
+        }
+        plugin.getJailManager().jail(target, minutes, "Eingesperrt von " + sender.getName() + ".");
+        sender.sendMessage("§a" + target.getName() + " ist für " + minutes + " Minuten im Gefängnis.");
+    }
+    private void handleRelease(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            sender.sendMessage("§eBenutzung: /bw frei <spieler>");
+            return;
+        }
+        Player online = Bukkit.getPlayerExact(args[0]);
+        Optional<UUID> id = online != null ? Optional.of(online.getUniqueId())
+                : plugin.getJailManager().findByName(args[0]);
+        if (id.isPresent() && plugin.getJailManager().release(id.get())) {
+            sender.sendMessage("§a" + args[0] + " ist frei" + (online == null ? " (beim nächsten Login)." : "."));
+        } else {
+            sender.sendMessage("§c" + args[0] + " ist nicht im Gefängnis.");
+        }
+    }
+    private void handleSetJail(CommandSender sender) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("§cNur im Spiel.");
+            return;
+        }
+        plugin.getJailManager().setCell(player.getLocation());
+        sender.sendMessage("§aGefängniszelle ist jetzt hier. Achte darauf, dass man hier nicht herauskommt.");
+    }
+
+    /** Statistik-Seiten: eine Zeile je Spieler und Blocktyp (Sortierung siehe Database#materials). */
+    private Pages statistics(String title, List<Database.MaterialSummary> rows) {
+        List<String> lines = new ArrayList<>();
+        for (Database.MaterialSummary row : rows) {
+            lines.add(materialLine(row));
+        }
+        List<String> header = new ArrayList<>();
+        header.add(title);
+        if (!rows.isEmpty()) {
+            header.add("§8Spieler · Blocktyp · Anzahl · zuletzt");
+        }
+        return new Pages(header, lines);
+    }
+
+    private String materialLine(Database.MaterialSummary row) {
+        List<String> parts = new ArrayList<>();
+        for (Action action : Action.values()) {
+            Integer count = row.counts().get(action);
+            if (count != null) {
+                parts.add((action.isDangerous() ? "§c" : "§a") + count + " " + action.label());
+            }
+        }
+        return actorColor(row.actor()) + row.actor() + " §8· §e" + pretty(row.material()) + " §8· "
+                + String.join("§7, ", parts) + " §8· " + timeFormat.format(Instant.ofEpochMilli(row.lastTimestamp()));
     }
 
     private Filter parseFilter(CommandSender sender, String[] args) {
@@ -311,15 +347,20 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         return new Filter(radius, since, timeLabel);
     }
 
+    private static boolean hasFlag(String[] args, String flag) {
+        return Arrays.stream(args).anyMatch(arg -> arg.equalsIgnoreCase(flag));
+    }
+
+    /**
+     * Konsole/RCON: direkt beantworten - RCON nimmt nur Ausgaben an, die
+     * waehrend des Befehls kommen (Abfragen sind indexiert und kurz).
+     * Spieler: im Async-Task, Ausgabe danach auf dem Server-Thread.
+     */
     private void runQuery(CommandSender sender, Query query) {
         if (!(sender instanceof Player)) {
-            // Konsole/RCON: direkt beantworten - RCON nimmt nur Ausgaben an, die
-            // waehrend des Befehls kommen. Abfragen sind indexiert und kurz.
             try {
                 plugin.getRecorder().flush();
-                Pages pages = query.run();
-                lastResults.put(key(sender), pages);
-                sendPage(sender, pages, 1);
+                show(sender, query.run());
             } catch (SQLException exception) {
                 sender.sendMessage("§cAbfrage fehlgeschlagen: " + exception.getMessage());
             }
@@ -329,81 +370,34 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             try {
                 plugin.getRecorder().flush();
                 Pages pages = query.run();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    lastResults.put(key(sender), pages);
-                    sendPage(sender, pages, 1);
-                });
+                Bukkit.getScheduler().runTask(plugin, () -> show(sender, pages));
             } catch (SQLException exception) {
-                fail(sender, exception);
+                plugin.getLogger().warning("Abfrage fehlgeschlagen: " + exception.getMessage());
+                Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage("§cAbfrage fehlgeschlagen: "
+                        + exception.getMessage()));
             }
         });
     }
 
-    @FunctionalInterface
-    private interface LinesQuery {
-        List<String> run() throws SQLException;
-    }
-
-    private void runAsync(CommandSender sender, LinesQuery query) {
-        if (!(sender instanceof Player)) {
-            try {
-                plugin.getRecorder().flush();
-                query.run().forEach(sender::sendMessage);
-            } catch (SQLException exception) {
-                sender.sendMessage("§cAbfrage fehlgeschlagen: " + exception.getMessage());
-            }
-            return;
-        }
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                plugin.getRecorder().flush();
-                List<String> lines = query.run();
-                Bukkit.getScheduler().runTask(plugin, () -> lines.forEach(sender::sendMessage));
-            } catch (SQLException exception) {
-                fail(sender, exception);
-            }
-        });
-    }
-
-    private void fail(CommandSender sender, SQLException exception) {
-        plugin.getLogger().warning("Abfrage fehlgeschlagen: " + exception.getMessage());
-        Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage("§cAbfrage fehlgeschlagen: "
-                + exception.getMessage()));
+    private void show(CommandSender sender, Pages pages) {
+        lastResults.put(key(sender), pages);
+        sendPage(sender, pages, 1);
     }
 
     private void sendPage(CommandSender sender, Pages pages, int page) {
-        int pageCount = Math.max(1, (pages.entries().size() + pageSize - 1) / pageSize);
+        int pageCount = Math.max(1, (pages.rows().size() + pageSize - 1) / pageSize);
         page = Math.min(Math.max(1, page), pageCount);
         pages.header().forEach(sender::sendMessage);
-        if (pages.entries().isEmpty()) {
+        if (pages.rows().isEmpty()) {
             sender.sendMessage("§7Keine Einträge gefunden.");
             return;
         }
         int from = (page - 1) * pageSize;
-        for (LogEntry entry : pages.entries().subList(from, Math.min(from + pageSize, pages.entries().size()))) {
-            sendEntry(sender, entry);
+        pages.rows().subList(from, Math.min(from + pageSize, pages.rows().size())).forEach(sender::sendMessage);
+        if (pageCount > 1) {
+            sender.sendMessage("§7Seite " + page + "/" + pageCount
+                    + (page < pageCount ? " §7- weiter mit §e/bw seite " + (page + 1) : ""));
         }
-        String more = pages.entries().size() >= QUERY_LIMIT ? " §8(nur die neuesten " + QUERY_LIMIT + ")" : "";
-        sender.sendMessage("§7Seite " + page + "/" + pageCount + " §8(" + pages.entries().size() + " Einträge)"
-                + more + (page < pageCount ? " §7- weiter mit §e/bw seite " + (page + 1) : ""));
-    }
-
-    private void sendEntry(CommandSender sender, LogEntry entry) {
-        String coords = entry.x() + " " + entry.y() + " " + entry.z();
-        String text = "§7" + timeFormat.format(Instant.ofEpochMilli(entry.timestamp())) + " "
-                + actorColor(entry.actor()) + entry.actor() + " " + (entry.action().isDangerous() ? "§c" : "§a")
-                + entry.action().label() + " §e" + pretty(entry.material()) + " §8(" + coords + ")";
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage(text + " §8" + entry.world());
-            return;
-        }
-        TextComponent line = new TextComponent(TextComponent.fromLegacyText(text));
-        if (player.getWorld().getName().equals(entry.world())) {
-            line.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND,
-                    "/minecraft:tp @s " + entry.x() + " " + entry.y() + " " + entry.z()));
-            line.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new Text("Klicken: hinteleportieren")));
-        }
-        player.spigot().sendMessage(new BaseComponent[]{line});
     }
 
     private static String summaryLine(Database.ActorSummary summary) {
@@ -421,78 +415,6 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             parts.add("§c" + dangerous + " gefährlich");
         }
         return actorColor(summary.actor()) + summary.actor() + "§7: " + String.join("§7, ", parts);
-    }
-
-    /** Eine Zeile "Spieler · Blocktyp · Anzahl je Aktion" fuer /bw hier. */
-    private static String materialLine(Database.MaterialSummary row) {
-        List<String> parts = new ArrayList<>();
-        for (Action action : Action.values()) {
-            Integer count = row.counts().get(action);
-            if (count != null) {
-                parts.add((action.isDangerous() ? "§c" : "§a") + count + " " + action.label());
-            }
-        }
-        return " " + actorColor(row.actor()) + row.actor() + " §8· §e" + pretty(row.material()) + " §8· "
-                + String.join("§7, ", parts);
-    }
-
-    private void handleJail(CommandSender sender, String[] args) {
-        if (args.length < 1) {
-            sender.sendMessage("§eBenutzung: /bw jail <spieler> [minuten]");
-            return;
-        }
-        Player target = Bukkit.getPlayerExact(args[0]);
-        if (target == null) {
-            sender.sendMessage("§cSpieler ist nicht online: " + args[0]);
-            return;
-        }
-        int minutes = plugin.getConfig().getInt("protection.jail-minutes", 3);
-        if (args.length > 1) {
-            try {
-                minutes = Integer.parseInt(args[1]);
-            } catch (NumberFormatException exception) {
-                sender.sendMessage("§cUngültige Minutenzahl: " + args[1]);
-                return;
-            }
-        }
-        plugin.getJailManager().jail(target, minutes, "Eingesperrt von " + sender.getName() + ".");
-        sender.sendMessage("§a" + target.getName() + " ist für " + minutes + " Minuten im Gefängnis.");
-    }
-
-    private void handleRelease(CommandSender sender, String[] args) {
-        if (args.length < 1) {
-            sender.sendMessage("§eBenutzung: /bw frei <spieler>");
-            return;
-        }
-        Player online = Bukkit.getPlayerExact(args[0]);
-        java.util.Optional<UUID> id = online != null ? java.util.Optional.of(online.getUniqueId())
-                : plugin.getJailManager().findByName(args[0]);
-        if (id.isPresent() && plugin.getJailManager().release(id.get())) {
-            sender.sendMessage("§a" + args[0] + " ist frei" + (online == null ? " (beim nächsten Login)." : "."));
-        } else {
-            sender.sendMessage("§c" + args[0] + " ist nicht im Gefängnis.");
-        }
-    }
-
-    private void handleSetJail(CommandSender sender) {
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage("§cNur im Spiel.");
-            return;
-        }
-        plugin.getJailManager().setCell(player.getLocation());
-        sender.sendMessage("§aGefängniszelle ist jetzt hier. Achte darauf, dass man hier nicht herauskommt.");
-    }
-
-    /** Alle Aktionsarten einzeln, fuer /bw spieler. */
-    private static String detailLine(Database.ActorSummary summary) {
-        List<String> parts = new ArrayList<>();
-        for (Action action : Action.values()) {
-            Integer count = summary.counts().get(action);
-            if (count != null) {
-                parts.add((action.isDangerous() ? "§c" : "§a") + count + " " + action.label());
-            }
-        }
-        return String.join("§7, ", parts);
     }
 
     private static String actorColor(String actor) {
@@ -513,7 +435,8 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         if (args.length == 1) {
             return SUBCOMMANDS.stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         }
-        if (args.length == 2 && args[0].equalsIgnoreCase("spieler")) {
+        if (args.length == 2 && (args[0].equalsIgnoreCase("spieler") || args[0].equalsIgnoreCase("jail")
+                || args[0].equalsIgnoreCase("frei"))) {
             return Bukkit.getOnlinePlayers().stream().map(Player::getName)
                     .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         }
