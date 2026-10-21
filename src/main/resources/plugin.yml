@@ -8,11 +8,14 @@ description: ${project.description}
 commands:
   bw:
     description: BlockWatch - wer hat hier wann was gemacht?
-    usage: /<command> <hier|inspect|gefahr|spieler|stats|bei|seite>
+    usage: /<command> <hier|inspect|gefahr|spieler|stats|bei|seite|jail|frei|setjail>
     aliases: [blockwatch]
     permission: blockwatch.use
 
 permissions:
   blockwatch.use:
     description: Darf das BlockWatch-Protokoll abfragen
+    default: op
+  blockwatch.bypass:
+    description: Darf gefaehrliche Gegenstaende (protection.blocked) benutzen, ohne ins Gefaengnis zu kommen
     default: op

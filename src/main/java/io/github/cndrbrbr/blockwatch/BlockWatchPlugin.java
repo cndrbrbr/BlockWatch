@@ -3,6 +3,8 @@ package io.github.cndrbrbr.blockwatch;
 import io.github.cndrbrbr.blockwatch.command.BlockWatchCommand;
 import io.github.cndrbrbr.blockwatch.listener.InspectListener;
 import io.github.cndrbrbr.blockwatch.listener.WatchListener;
+import io.github.cndrbrbr.blockwatch.protection.JailManager;
+import io.github.cndrbrbr.blockwatch.protection.ProtectionListener;
 import io.github.cndrbrbr.blockwatch.storage.Database;
 import io.github.cndrbrbr.blockwatch.storage.Recorder;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -18,10 +20,14 @@ public final class BlockWatchPlugin extends JavaPlugin {
 
     private Database database;
     private Recorder recorder;
+    private JailManager jailManager;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        // Neue Einstellungen aus Updates in eine bestehende config.yml uebernehmen.
+        getConfig().options().copyDefaults(true);
+        saveConfig();
         getDataFolder().mkdirs();
         try {
             database = new Database(new File(getDataFolder(), "blockwatch.db"));
@@ -33,6 +39,13 @@ public final class BlockWatchPlugin extends JavaPlugin {
         recorder = new Recorder(database, getLogger());
         getServer().getScheduler().runTaskTimerAsynchronously(this, recorder::flush, FLUSH_TICKS, FLUSH_TICKS);
         getServer().getScheduler().runTaskTimerAsynchronously(this, this::purgeOld, 20L * 60, PURGE_TICKS);
+
+        jailManager = new JailManager(this);
+        getServer().getPluginManager().registerEvents(jailManager, this);
+        if (getConfig().getBoolean("protection.enabled", true)) {
+            getServer().getPluginManager().registerEvents(
+                    new ProtectionListener(recorder, jailManager, getConfig(), getLogger()), this);
+        }
 
         BlockWatchCommand command = new BlockWatchCommand(this, database);
         getCommand("bw").setExecutor(command);
@@ -58,6 +71,10 @@ public final class BlockWatchPlugin extends JavaPlugin {
 
     public Recorder getRecorder() {
         return recorder;
+    }
+
+    public JailManager getJailManager() {
+        return jailManager;
     }
 
     private void purgeOld() {

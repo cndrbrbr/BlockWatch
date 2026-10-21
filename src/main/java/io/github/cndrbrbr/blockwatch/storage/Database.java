@@ -32,6 +32,13 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /** Anzahl je Aktion fuer eine Kombination aus Akteur und Blocktyp. */
+    public record MaterialSummary(String actor, String material, Map<Action, Integer> counts) {
+        public int total() {
+            return counts.values().stream().mapToInt(Integer::intValue).sum();
+        }
+    }
+
     /** Suchbereich: Quader um einen Punkt, optional nur gefaehrliche Aktionen und ab einem Zeitpunkt. */
     public record Area(String world, int x, int y, int z, int radius) {
     }
@@ -111,6 +118,40 @@ public final class Database implements AutoCloseable {
             query.setLong(index, since);
             return readSummaries(query);
         }
+    }
+
+    /** Zusammenfassung je Akteur und Blocktyp im Quader, sortiert nach Akteur (meiste zuerst), dann Anzahl. */
+    public synchronized List<MaterialSummary> materialsNear(Area area, long since, boolean dangerOnly)
+            throws SQLException {
+        Map<String, Map<String, Map<Action, Integer>>> byActor = new LinkedHashMap<>();
+        try (PreparedStatement query = connection.prepareStatement("SELECT actor, material, action, COUNT(*) FROM events "
+                + "WHERE " + areaClause() + " AND ts >= ?" + (dangerOnly ? " AND danger = 1" : "")
+                + " GROUP BY actor, material, action")) {
+            int index = bindArea(query, area);
+            query.setLong(index, since);
+            try (ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    Action action = Action.fromName(result.getString(3)).orElse(null);
+                    if (action != null) {
+                        byActor.computeIfAbsent(result.getString(1), key -> new LinkedHashMap<>())
+                                .computeIfAbsent(result.getString(2), key -> new LinkedHashMap<>())
+                                .merge(action, result.getInt(4), Integer::sum);
+                    }
+                }
+            }
+        }
+        List<MaterialSummary> summaries = new ArrayList<>();
+        byActor.entrySet().stream()
+                .sorted((a, b) -> Integer.compare(actorTotal(b.getValue()), actorTotal(a.getValue())))
+                .forEach(actor -> actor.getValue().entrySet().stream()
+                        .map(material -> new MaterialSummary(actor.getKey(), material.getKey(), material.getValue()))
+                        .sorted((a, b) -> Integer.compare(b.total(), a.total()))
+                        .forEach(summaries::add));
+        return summaries;
+    }
+
+    private static int actorTotal(Map<String, Map<Action, Integer>> materials) {
+        return materials.values().stream().flatMap(m -> m.values().stream()).mapToInt(Integer::intValue).sum();
     }
 
     /** Alle Eintraege genau dieses Blocks, neueste zuerst. */

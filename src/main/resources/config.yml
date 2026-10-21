@@ -16,3 +16,19 @@ page-size: 10
 # Gesetzte/abgebaute Bloecke protokollieren (gefaehrliche Aktionen werden immer protokolliert).
 log-break: true
 log-place: true
+
+# Gefaehrliche Gegenstaende verhindern: Wer (ohne blockwatch.bypass, Standard: OP)
+# einen davon setzt oder benutzt, wird gestoppt, protokolliert und kommt ins Gefaengnis.
+protection:
+  enabled: true
+  jail-minutes: 3
+  blocked:
+    - TNT
+    - TNT_MINECART
+    - END_CRYSTAL
+    - LAVA_BUCKET
+    - FLINT_AND_STEEL
+    - FIRE_CHARGE
+    - RESPAWN_ANCHOR
+  # Zelle: ohne Angabe wird beim ersten Bedarf eine Grundgesteinszelle hoch ueber dem
+  # Spawn der Hauptwelt gebaut und hier eingetragen. Verschieben mit /bw setjail.

@@ -58,6 +58,15 @@ class DatabaseTest {
     }
 
     @Test
+    void materialsNearGroupsByActorAndMaterial() throws Exception {
+        List<Database.MaterialSummary> rows = database.materialsNear(new Database.Area("world", 0, 64, 0, 5), 0, false);
+        assertEquals(4, rows.size());
+        assertEquals("Alex", rows.get(0).actor());
+        assertEquals("#TNT", rows.get(3).actor());
+        assertEquals("DIRT", rows.get(3).material());
+    }
+
+        @Test
     void blockHistoryIsExactPosition() throws Exception {
         assertEquals(2, database.block("world", 0, 64, 0, 100).size());
         assertEquals(0, database.block("world", 0, 65, 0, 100).size());

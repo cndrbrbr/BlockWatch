@@ -13,7 +13,9 @@ public enum Action {
     IGNITE("Feuer gelegt", true),
     LAVA("Lava ausgegossen", true),
     EXPLODE("gesprengt", true),
-    BURN("verbrannt", true);
+    BURN("verbrannt", true),
+    /** Verbotene gefaehrliche Aktion, abgebrochen und mit Gefaengnis bestraft (siehe Protection). */
+    BLOCKED("verbotener Versuch", true);
 
     private final String label;
     private final boolean dangerous;

@@ -37,10 +37,12 @@ import java.util.UUID;
 /** {@code /bw} - Abfragen des Protokolls, siehe README.md. */
 public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
 
-    private static final List<String> SUBCOMMANDS = List.of("hier", "inspect", "gefahr", "spieler", "stats", "bei", "seite");
+    private static final List<String> SUBCOMMANDS = List.of("hier", "inspect", "gefahr", "spieler", "stats", "bei", "seite",
+            "jail", "frei", "setjail");
     /** Hoechstens so viele Eintraege je Abfrage laden (danach weiter eingrenzen). */
     private static final int QUERY_LIMIT = 1000;
     private static final int TOP_ACTORS = 15;
+    private static final int SUMMARY_ROWS = 15;
 
     /** Ergebnis einer Abfrage zum Blaettern: feste Kopfzeilen plus Eintragszeilen. */
     private record Pages(List<String> header, List<LogEntry> entries) {
@@ -91,6 +93,9 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             case "stats" -> handleStats(sender, rest);
             case "bei", "at" -> handleAt(sender, rest);
             case "seite", "page" -> handlePage(sender, rest);
+            case "jail" -> handleJail(sender, rest);
+            case "frei", "release" -> handleRelease(sender, rest);
+            case "setjail" -> handleSetJail(sender);
             default -> sendHelp(sender);
         }
         return true;
@@ -105,6 +110,8 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/bw stats §7[zeit] §f- Rangliste aller Spieler");
         sender.sendMessage("§e/bw bei §7<welt> <x> <y> <z> [radius] [zeit] §f- wie hier, z. B. von der Konsole");
         sender.sendMessage("§e/bw seite §7<n> §f- weiterblättern");
+        sender.sendMessage("§e/bw jail §7<spieler> [minuten] §f/ §e/bw frei §7<spieler> §f- Gefängnis");
+        sender.sendMessage("§e/bw setjail §f- Gefängniszelle an deine Position setzen");
         sender.sendMessage("§7Zeit z. B. §f30m§7, §f2h§7, §f7d§7, §f2w §7- ohne Angabe: alles");
     }
 
@@ -164,8 +171,18 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             header.add("§6BlockWatch §7- " + (dangerOnly ? "§cgefährliche Aktionen §7" : "")
                     + "Umkreis " + filter.radius + " um §f" + area.x() + " " + area.y() + " " + area.z()
                     + "§7, " + filter.timeLabel);
-            for (Database.ActorSummary summary : database.summaryNear(area, filter.since, dangerOnly)) {
-                header.add(summaryLine(summary));
+            List<Database.MaterialSummary> rows = database.materialsNear(area, filter.since, dangerOnly);
+            if (!rows.isEmpty()) {
+                header.add("§7Statistik §8(Spieler · Blocktyp · Anzahl)§7:");
+            }
+            for (Database.MaterialSummary row : rows.subList(0, Math.min(SUMMARY_ROWS, rows.size()))) {
+                header.add(materialLine(row));
+            }
+            if (rows.size() > SUMMARY_ROWS) {
+                header.add("§8… und " + (rows.size() - SUMMARY_ROWS) + " weitere Kombinationen (Radius/Zeit eingrenzen)");
+            }
+            if (!rows.isEmpty()) {
+                header.add("§7Einträge:");
             }
             return new Pages(header, database.near(area, filter.since, dangerOnly, QUERY_LIMIT));
         });
@@ -404,6 +421,66 @@ public final class BlockWatchCommand implements CommandExecutor, TabCompleter {
             parts.add("§c" + dangerous + " gefährlich");
         }
         return actorColor(summary.actor()) + summary.actor() + "§7: " + String.join("§7, ", parts);
+    }
+
+    /** Eine Zeile "Spieler · Blocktyp · Anzahl je Aktion" fuer /bw hier. */
+    private static String materialLine(Database.MaterialSummary row) {
+        List<String> parts = new ArrayList<>();
+        for (Action action : Action.values()) {
+            Integer count = row.counts().get(action);
+            if (count != null) {
+                parts.add((action.isDangerous() ? "§c" : "§a") + count + " " + action.label());
+            }
+        }
+        return " " + actorColor(row.actor()) + row.actor() + " §8· §e" + pretty(row.material()) + " §8· "
+                + String.join("§7, ", parts);
+    }
+
+    private void handleJail(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            sender.sendMessage("§eBenutzung: /bw jail <spieler> [minuten]");
+            return;
+        }
+        Player target = Bukkit.getPlayerExact(args[0]);
+        if (target == null) {
+            sender.sendMessage("§cSpieler ist nicht online: " + args[0]);
+            return;
+        }
+        int minutes = plugin.getConfig().getInt("protection.jail-minutes", 3);
+        if (args.length > 1) {
+            try {
+                minutes = Integer.parseInt(args[1]);
+            } catch (NumberFormatException exception) {
+                sender.sendMessage("§cUngültige Minutenzahl: " + args[1]);
+                return;
+            }
+        }
+        plugin.getJailManager().jail(target, minutes, "Eingesperrt von " + sender.getName() + ".");
+        sender.sendMessage("§a" + target.getName() + " ist für " + minutes + " Minuten im Gefängnis.");
+    }
+
+    private void handleRelease(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            sender.sendMessage("§eBenutzung: /bw frei <spieler>");
+            return;
+        }
+        Player online = Bukkit.getPlayerExact(args[0]);
+        java.util.Optional<UUID> id = online != null ? java.util.Optional.of(online.getUniqueId())
+                : plugin.getJailManager().findByName(args[0]);
+        if (id.isPresent() && plugin.getJailManager().release(id.get())) {
+            sender.sendMessage("§a" + args[0] + " ist frei" + (online == null ? " (beim nächsten Login)." : "."));
+        } else {
+            sender.sendMessage("§c" + args[0] + " ist nicht im Gefängnis.");
+        }
+    }
+
+    private void handleSetJail(CommandSender sender) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("§cNur im Spiel.");
+            return;
+        }
+        plugin.getJailManager().setCell(player.getLocation());
+        sender.sendMessage("§aGefängniszelle ist jetzt hier. Achte darauf, dass man hier nicht herauskommt.");
     }
 
     /** Alle Aktionsarten einzeln, fuer /bw spieler. */
