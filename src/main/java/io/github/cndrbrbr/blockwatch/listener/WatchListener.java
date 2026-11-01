@@ -3,6 +3,7 @@ package io.github.cndrbrbr.blockwatch.listener;
 import io.github.cndrbrbr.blockwatch.storage.Action;
 import io.github.cndrbrbr.blockwatch.storage.LogEntry;
 import io.github.cndrbrbr.blockwatch.storage.Recorder;
+import org.bukkit.ExplosionResult;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -101,6 +102,9 @@ public final class WatchListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityExplode(EntityExplodeEvent event) {
+        if (!destroysBlocks(event.getExplosionResult())) {
+            return; // z. B. Windkugel oder Creeper ohne mobGriefing: kein Block geht kaputt
+        }
         Entity entity = event.getEntity();
         Player player = null;
         String actor;
@@ -125,12 +129,23 @@ public final class WatchListener implements Listener {
     /** Betten/Seelenanker ausserhalb ihrer Dimension - der ausloesende Spieler ist hier nicht bekannt. */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockExplode(BlockExplodeEvent event) {
+        if (!destroysBlocks(event.getExplosionResult())) {
+            return;
+        }
         recordExploded(event.blockList(), null, "#" + event.getExplodedBlockState().getType().name());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBurn(BlockBurnEvent event) {
         record(event.getBlock().getLocation(), null, "#Feuer", Action.BURN, event.getBlock().getType().name());
+    }
+
+    /**
+     * Nur DESTROY/DESTROY_WITH_DECAY zerstoeren Bloecke. Windkugeln (TRIGGER_BLOCK) liefern
+     * trotzdem eine blockList - die Bloecke werden nur ausgeloest (Knoepfe, Tueren), nicht entfernt.
+     */
+    private static boolean destroysBlocks(ExplosionResult result) {
+        return result == ExplosionResult.DESTROY || result == ExplosionResult.DESTROY_WITH_DECAY;
     }
 
     private void recordExploded(List<Block> blocks, Player player, String actor) {
