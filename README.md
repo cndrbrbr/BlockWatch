@@ -73,6 +73,10 @@ Sortiert nach Spieler (meiste Aktionen zuerst), dann nach Anzahl. Zeitangaben: `
 `plugins/BlockWatch/blockwatch.db` (SQLite; der Treiber ist in Spigot enthalten). Einstellungen
 in `plugins/BlockWatch/config.yml` (Aufbewahrung, Zeitzone, Radius, Seitengröße).
 
+## Architektur
+
+Aufbau, Konzepte und Entscheidungen nach arc42: [architektur/](architektur/README.md).
+
 ## Bauen
 
 ```bash
