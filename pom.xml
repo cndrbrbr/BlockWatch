@@ -6,7 +6,7 @@
 
     <groupId>io.github.cndrbrbr</groupId>
     <artifactId>blockwatch</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.2</version>
     <packaging>jar</packaging>
 
     <name>BlockWatch</name>

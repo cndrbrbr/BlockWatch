@@ -7,6 +7,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -18,10 +19,12 @@ import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.persistence.PersistentDataType;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -38,11 +41,20 @@ public final class JailManager implements Listener {
     /** Wie weit sich ein Insasse von der Zelle entfernen darf, bevor er zurueckgeholt wird. */
     private static final double MAX_DISTANCE = 4.0;
 
+    /**
+     * Gefaengnisse anderer Plugins, die dieselbe Markierung im Spieler-PDC setzen. Wer dort sitzt,
+     * wird hier nicht zusaetzlich eingesperrt - sonst blockieren sich die Teleports gegenseitig und
+     * der Spieler landet nach der zweiten Strafe in der ersten Zelle im Abenteuermodus.
+     */
+    private static final List<NamespacedKey> OTHER_JAILS = List.of(NamespacedKey.fromString("correctness:jailed_until"));
+
     private record Inmate(String name, long until, Location returnTo, GameMode gameMode) {
     }
 
     private final BlockWatchPlugin plugin;
     private final File file;
+    /** Eigene Markierung im Spieler-PDC: Endzeit in ms, solange der Spieler hier sitzt. */
+    private final NamespacedKey marker;
     private final Map<UUID, Inmate> inmates = new HashMap<>();
     /** Erlaubt die eigenen Teleports trotz {@link #onTeleport}. */
     private boolean teleporting;
@@ -50,6 +62,7 @@ public final class JailManager implements Listener {
     public JailManager(BlockWatchPlugin plugin) {
         this.plugin = plugin;
         this.file = new File(plugin.getDataFolder(), "jail.yml");
+        this.marker = new NamespacedKey(plugin, "jailed_until");
         load();
         plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
     }
@@ -58,12 +71,21 @@ public final class JailManager implements Listener {
         return inmates.containsKey(playerId);
     }
 
-    /** Sperrt ein (bzw. verlaengert bis mindestens jetzt + minutes). */
-    public void jail(Player player, int minutes, String reason) {
+    /**
+     * Sperrt ein (bzw. verlaengert bis mindestens jetzt + minutes).
+     *
+     * @return false, wenn nicht eingesperrt wurde: der Spieler sitzt schon in einem anderen
+     *         Gefaengnis ({@link #jailedElsewhere}) oder es gibt keine Zelle
+     */
+    public boolean jail(Player player, int minutes, String reason) {
+        if (!isJailed(player.getUniqueId()) && jailedElsewhere(player)) {
+            plugin.getLogger().info(player.getName() + " sitzt schon in einem anderen Gefängnis - nicht zusätzlich eingesperrt.");
+            return false;
+        }
         Optional<Location> cell = cell();
         if (cell.isEmpty()) {
             plugin.getLogger().warning("Kein Gefängnis verfügbar - " + player.getName() + " nicht eingesperrt.");
-            return;
+            return false;
         }
         long until = System.currentTimeMillis() + minutes * 60_000L;
         Inmate previous = inmates.get(player.getUniqueId());
@@ -72,6 +94,7 @@ public final class JailManager implements Listener {
                 : new Inmate(player.getName(), until, player.getLocation(), player.getGameMode());
         inmates.put(player.getUniqueId(), inmate);
         save();
+        mark(player, inmate.until());
         moveToCell(player, cell.get());
         player.sendMessage("§c§lGefängnis! §r§c" + reason + " Du bist für " + minutes + " Minute"
                 + (minutes == 1 ? "" : "n") + " eingesperrt.");
@@ -82,6 +105,7 @@ public final class JailManager implements Listener {
                 online.sendMessage(notice);
             }
         }
+        return true;
     }
 
     /** Vorzeitig freilassen; offline Spieler werden beim naechsten Login freigelassen. */
@@ -98,6 +122,7 @@ public final class JailManager implements Listener {
         }
         inmates.remove(playerId);
         save();
+        player.getPersistentDataContainer().remove(marker);
         teleport(player, inmate.returnTo() != null && inmate.returnTo().getWorld() != null
                 ? inmate.returnTo() : player.getWorld().getSpawnLocation());
         player.setGameMode(inmate.gameMode());
@@ -169,6 +194,7 @@ public final class JailManager implements Listener {
                 release(entry.getKey());
                 continue;
             }
+            mark(player, entry.getValue().until()); // auch fuer Insassen aus aelteren Versionen
             long seconds = (remaining + 999) / 1000;
             player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(
                     String.format("§cGefängnis: noch %d:%02d", seconds / 60, seconds % 60)));
@@ -178,6 +204,22 @@ public final class JailManager implements Listener {
                 }
             });
         }
+    }
+
+    /** Sitzt der Spieler (laut Markierung) gerade im Gefaengnis eines anderen Plugins? */
+    public boolean jailedElsewhere(Player player) {
+        long now = System.currentTimeMillis();
+        for (NamespacedKey key : OTHER_JAILS) {
+            Long until = player.getPersistentDataContainer().get(key, PersistentDataType.LONG);
+            if (until != null && until > now) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void mark(Player player, long until) {
+        player.getPersistentDataContainer().set(marker, PersistentDataType.LONG, until);
     }
 
     private void moveToCell(Player player, Location cell) {
@@ -198,6 +240,7 @@ public final class JailManager implements Listener {
     public void onJoin(PlayerJoinEvent event) {
         Inmate inmate = inmates.get(event.getPlayer().getUniqueId());
         if (inmate == null) {
+            event.getPlayer().getPersistentDataContainer().remove(marker); // veraltete Markierung
             return;
         }
         if (inmate.until() <= System.currentTimeMillis()) {

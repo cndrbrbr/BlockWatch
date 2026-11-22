@@ -10,3 +10,4 @@ Entscheidungen bekommen den Status „ersetzt durch ADR-xxxx“. Vorlage: [adr/0
 | [0003](adr/0003-ausgabe-nur-als-statistik.md) | Abfragen zeigen nur Statistik, keine Einzeleinträge | angenommen |
 | [0004](adr/0004-verhindern-mit-gefaengnis.md) | Gefährliches verhindern und mit Gefängnis bestrafen | angenommen |
 | [0005](adr/0005-konsolenabfragen-synchron.md) | Konsolen-/RCON-Abfragen synchron | angenommen |
+| [0006](adr/0006-gefaengnisse-markieren-sich-gegenseitig.md) | Gefängnisse markieren sich gegenseitig im Spieler-PDC | angenommen |

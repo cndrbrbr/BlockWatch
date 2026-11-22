@@ -125,7 +125,9 @@ public final class ProtectionListener implements Listener {
         recorder.record(new LogEntry(System.currentTimeMillis(), where.getWorld().getName(), where.getBlockX(),
                 where.getBlockY(), where.getBlockZ(), player.getUniqueId(), player.getName(), Action.BLOCKED,
                 material.name()));
-        jail.jail(player, jailMinutes, pretty(material) + " ist hier verboten.");
+        if (!jail.jail(player, jailMinutes, pretty(material) + " ist hier verboten.")) {
+            player.sendMessage("§c" + pretty(material) + " ist hier verboten.");
+        }
         return true;
     }
 
